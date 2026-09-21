@@ -1,0 +1,283 @@
+/**
+ * apple.ts — thin client for Apple's US pickup-message API.
+ *
+ * Endpoint (verified live 2026-09-21):
+ *   GET https://www.apple.com/shop/retail/pickup-message
+ *     ?pl=true&mts.0=regular&store=R053&parts.0=XXXXLL%2FA
+ *   or
+ *     ?pl=true&mts.0=regular&location=32839&parts.0=XXXXLL%2FA
+ *
+ * Notes:
+ * - Cookies must be warmed first (GET a buy page), otherwise the API
+ *   returns an empty body. The client does this automatically.
+ * - The legacy /shop/fulfillment-messages endpoint is dead (HTTP 541).
+ * - Availability is tri-state: in_stock / out_of_stock / unknown.
+ *   Transport failures, blocks and unparseable responses MUST surface as
+ *   `unknown` with a reason — never silently as out_of_stock.
+ */
+
+export const APPLE_BASE_URL = "https://www.apple.com";
+export const PICKUP_MESSAGE_PATH = "/shop/retail/pickup-message";
+export const DEFAULT_REFERER = `${APPLE_BASE_URL}/shop/buy-iphone/iphone-18-pro`;
+export const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+export type AvailabilityKind = "in_stock" | "out_of_stock" | "unknown";
+
+export interface PartAvailability {
+  partNumber: string;
+  /** Tri-state availability. */
+  kind: AvailabilityKind;
+  /** Raw pickupDisplay value from Apple (e.g. "available"). */
+  pickupDisplay: string;
+  /** Human quote from Apple, e.g. "Today at Apple Millenia". */
+  quote: string | null;
+  /** Product title reported by Apple, e.g. "iPhone 18 Pro 256GB Glacier". */
+  productTitle: string | null;
+  /** Present only when kind === "unknown". */
+  reason?: string;
+}
+
+export interface StoreAvailability {
+  storeNumber: string;
+  storeName: string;
+  city: string | null;
+  state: string | null;
+  distance: string | null;
+  parts: PartAvailability[];
+}
+
+export type FetchFn = typeof fetch;
+
+export class AppleApiError extends Error {
+  readonly kind: "blocked" | "transport" | "parse";
+  constructor(kind: AppleApiError["kind"], message: string) {
+    super(message);
+    this.name = "AppleApiError";
+    this.kind = kind;
+  }
+}
+
+/** Minimal in-memory cookie jar (name=value pairs keyed by name). */
+export class CookieJar {
+  private cookies = new Map<string, string>();
+
+  storeFromHeaders(headers: Headers): void {
+    // Node's undici Headers exposes getSetCookie(); fall back gracefully.
+    const getSetCookie = (headers as unknown as { getSetCookie?: () => string[] }).getSetCookie;
+    const raw: string[] = getSetCookie ? getSetCookie.call(headers) : [];
+    for (const line of raw) {
+      const pair = line.split(";")[0];
+      const eq = pair.indexOf("=");
+      if (eq > 0) this.cookies.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
+  }
+
+  header(): string | null {
+    if (this.cookies.size === 0) return null;
+    return [...this.cookies.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+  }
+
+  get size(): number {
+    return this.cookies.size;
+  }
+}
+
+export interface QueryScope {
+  store?: string;
+  location?: string;
+}
+
+/** Build the pickup-message URL for the given scope + parts. */
+export function buildPickupUrl(parts: string[], scope: QueryScope): string {
+  const params = new URLSearchParams();
+  params.set("pl", "true");
+  params.set("mts.0", "regular");
+  if (scope.store) params.set("store", scope.store);
+  else if (scope.location) params.set("location", scope.location);
+  else throw new AppleApiError("transport", "Either store or location is required");
+  parts.forEach((p, i) => params.set(`parts.${i}`, p));
+  return `${APPLE_BASE_URL}${PICKUP_MESSAGE_PATH}?${params.toString()}`;
+}
+
+/** Warm cookies by visiting a buy page (Apple returns empty bodies without them). */
+export async function warmCookies(
+  jar: CookieJar,
+  fetchFn: FetchFn = fetch,
+  referer: string = DEFAULT_REFERER,
+): Promise<void> {
+  try {
+    const res = await fetchFn(referer, {
+      headers: { "User-Agent": USER_AGENT, Accept: "text/html,*/*" },
+    });
+    jar.storeFromHeaders(res.headers);
+    // Drain body so the connection can be reused.
+    await res.arrayBuffer().catch(() => undefined);
+  } catch {
+    // Warmup is best-effort; the query still goes out and any failure
+    // surfaces as `unknown` downstream.
+  }
+}
+
+function pickupHeaders(jar: CookieJar, referer: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "User-Agent": USER_AGENT,
+    Accept: "application/json",
+    Referer: referer,
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+  const cookies = jar.header();
+  if (cookies) headers["Cookie"] = cookies;
+  return headers;
+}
+
+/**
+ * Run one pickup-message query. Returns the raw parsed JSON.
+ * Throws AppleApiError on blocks (HTTP 541/5xx/429), transport failures,
+ * or non-JSON responses.
+ */
+export async function queryPickupRaw(
+  parts: string[],
+  scope: QueryScope,
+  opts: { jar?: CookieJar; referer?: string; fetchFn?: FetchFn } = {},
+): Promise<unknown> {
+  if (parts.length === 0) throw new AppleApiError("transport", "parts list is empty");
+  const jar = opts.jar ?? new CookieJar();
+  const referer = opts.referer ?? DEFAULT_REFERER;
+  const fetchFn = opts.fetchFn ?? fetch;
+
+  if (jar.size === 0) await warmCookies(jar, fetchFn, referer);
+
+  const url = buildPickupUrl(parts, scope);
+  let res: Response;
+  try {
+    res = await fetchFn(url, { headers: pickupHeaders(jar, referer) });
+  } catch (err) {
+    throw new AppleApiError("transport", `Network failure querying Apple: ${String(err)}`);
+  }
+  jar.storeFromHeaders(res.headers);
+
+  if (res.status === 541 || res.status === 429 || res.status >= 500) {
+    throw new AppleApiError(
+      "blocked",
+      `Apple rate-limited/blocked the request (HTTP ${res.status}). Wait 10-15 minutes before retrying.`,
+    );
+  }
+  if (!res.ok) {
+    throw new AppleApiError("transport", `Apple returned HTTP ${res.status}`);
+  }
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new AppleApiError("parse", "Apple returned a non-JSON response");
+  }
+}
+
+interface RawPartEntry {
+  partNumber?: string;
+  pickupDisplay?: string;
+  pickupSearchQuote?: string;
+  messageTypes?: {
+    regular?: {
+      storePickupQuote?: string;
+      storePickupQuote2_0?: string;
+      storePickupProductTitle?: string;
+    };
+  };
+}
+
+interface RawStore {
+  storeNumber?: string;
+  storeName?: string;
+  city?: string;
+  state?: string;
+  storeDistanceWithUnit?: string;
+  partsAvailability?: Record<string, RawPartEntry>;
+}
+
+function mapPickupDisplay(display: string): AvailabilityKind {
+  const d = display.trim().toLowerCase();
+  if (d === "available") return "in_stock";
+  if (["unavailable", "not available", "not_available", "out of stock", "nostock"].includes(d)) {
+    return "out_of_stock";
+  }
+  // Unknown display values -> unknown (fail open, never fake out_of_stock).
+  return "unknown";
+}
+
+function stripHtml(s: string): string {
+  return s.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function productTitleFor(store: RawStore, part: string): string | null {
+  const entry = store.partsAvailability?.[part];
+  // Canonical product title, e.g. "iPhone 18 Pro 256GB Glacier"
+  // (Apple uses U+00A0 non-breaking spaces — normalize them).
+  const titled = entry?.messageTypes?.regular?.storePickupProductTitle;
+  if (titled) return titled.replace(/[\u00a0]/g, " ");
+  // Fallback: pickupSearchQuote sometimes carries the title instead of a quote.
+  const quote = entry?.pickupSearchQuote ?? "";
+  if (quote && !/^(available|unavailable)/i.test(quote)) return quote;
+  return null;
+}
+
+/**
+ * Parse a pickup-message response body into tri-state store availability.
+ * `wantParts` is the list of parts requested (used to mark missing parts
+ * as unknown rather than dropping them silently).
+ */
+export function parsePickupResponse(body: unknown, wantParts: string[]): StoreAvailability[] {
+  const root = body as { body?: { stores?: RawStore[] } };
+  const stores = root?.body?.stores;
+  if (!Array.isArray(stores)) {
+    throw new AppleApiError("parse", "Apple response has no body.stores array");
+  }
+  return stores.map((s) => {
+    const availability = storeAvailability(s);
+    const storeNumber = availability?.storeNumber ?? s.storeNumber ?? "";
+    const parts: PartAvailability[] = wantParts.map((part) => {
+      const entry = s.partsAvailability?.[part];
+      if (!entry) {
+        return {
+          partNumber: part,
+          kind: "unknown" as const,
+          pickupDisplay: "",
+          quote: null,
+          productTitle: null,
+          reason: `Apple returned no data for ${part} at ${storeNumber || "this store"}`,
+        };
+      }
+      const display = entry.pickupDisplay ?? "";
+      const kind = mapPickupDisplay(display);
+      const regular = entry.messageTypes?.regular;
+      const quote = regular?.storePickupQuote
+        ? stripHtml(regular.storePickupQuote)
+        : entry.pickupSearchQuote
+          ? stripHtml(entry.pickupSearchQuote)
+          : null;
+      const title = productTitleFor(s, part);
+      return {
+        partNumber: part,
+        kind,
+        pickupDisplay: display,
+        quote,
+        productTitle: title,
+        ...(kind === "unknown" ? { reason: `Unrecognized pickupDisplay value: ${display!}` } : {}),
+      };
+    });
+    return {
+      storeNumber,
+      storeName: s.storeName ?? "",
+      city: s.city ?? null,
+      state: s.state ?? null,
+      distance: s.storeDistanceWithUnit ?? null,
+      parts,
+    };
+  });
+}
+
+function storeAvailability(s: RawStore): { storeNumber: string } | null {
+  return s.storeNumber ? { storeNumber: s.storeNumber } : null;
+}

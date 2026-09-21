@@ -1,0 +1,29 @@
+{
+  "name": "apple-stock-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for point-in-time Apple Store pickup availability (US) — ask if a device is in stock at nearby stores",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "apple-stock-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "npm run build && vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
