@@ -45,10 +45,22 @@ export interface PartAvailability {
   pickupDisplay: string;
   /** Human quote from Apple, e.g. "Today at Apple Millenia". */
   quote: string | null;
+  /**
+   * Day granularity parsed from Apple's quote, e.g. "Today".
+   * The pickup-message API gives no time slots — the exact pickup window
+   * is assigned at checkout. Null when unavailable/unknown.
+   */
+  pickupDay: string | null;
   /** Product title reported by Apple, e.g. "iPhone 18 Pro 256GB Glacier". */
   productTitle: string | null;
   /** Present only when kind === "unknown". */
   reason?: string;
+}
+
+/** One store-hours row from Apple, e.g. { days: "Mon-Sat:", timings: "10:00 AM-9:00 PM" }. */
+export interface StoreHoursEntry {
+  days: string;
+  timings: string;
 }
 
 export interface StoreAvailability {
@@ -57,6 +69,10 @@ export interface StoreAvailability {
   city: string | null;
   state: string | null;
   distance: string | null;
+  /** Store opening hours (general hours, not per-part pickup slots). */
+  storeHours: StoreHoursEntry[] | null;
+  /** e.g. "In-Store Pickup available at this location." */
+  pickupTypeText: string | null;
   parts: PartAvailability[];
 }
 
@@ -254,6 +270,10 @@ interface RawStore {
   city?: string;
   state?: string;
   storeDistanceWithUnit?: string;
+  pickupTypeAvailabilityText?: string;
+  storeHours?: {
+    hours?: { storeDays?: string; storeTimings?: string }[];
+  };
   partsAvailability?: Record<string, RawPartEntry>;
 }
 
@@ -269,6 +289,29 @@ function mapPickupDisplay(display: string): AvailabilityKind {
 
 function stripHtml(s: string): string {
   return s.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Day granularity from Apple's quote ("Today at Apple Millenia",
+ * "Available Today") — the finest the API offers. Returns the leading day
+ * word (Today/Tomorrow/weekday) or null when the quote carries no day info
+ * (e.g. "Currently unavailable").
+ */
+export function pickupDayFromQuote(quote: string | null): string | null {
+  if (!quote) return null;
+  const m = quote.match(/^(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+  if (m) return m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+  const m2 = quote.match(/\b(today|tomorrow)\b/i);
+  return m2 ? m2[1][0].toUpperCase() + m2[1].slice(1).toLowerCase() : null;
+}
+
+function storeHoursFor(s: RawStore): StoreHoursEntry[] | null {
+  const hours = s.storeHours?.hours;
+  if (!Array.isArray(hours) || hours.length === 0) return null;
+  const mapped = hours
+    .filter((h) => h.storeDays || h.storeTimings)
+    .map((h) => ({ days: h.storeDays ?? "", timings: h.storeTimings ?? "" }));
+  return mapped.length > 0 ? mapped : null;
 }
 
 function productTitleFor(store: RawStore, part: string): string | null {
@@ -305,6 +348,7 @@ export function parsePickupResponse(body: unknown, wantParts: string[]): StoreAv
           kind: "unknown" as const,
           pickupDisplay: "",
           quote: null,
+          pickupDay: null,
           productTitle: null,
           reason: `Apple returned no data for ${part} at ${storeNumber || "this store"}`,
         };
@@ -323,6 +367,7 @@ export function parsePickupResponse(body: unknown, wantParts: string[]): StoreAv
         kind,
         pickupDisplay: display,
         quote,
+        pickupDay: kind === "in_stock" ? pickupDayFromQuote(quote) : null,
         productTitle: title,
         ...(kind === "unknown" ? { reason: `Unrecognized pickupDisplay value: ${display || "(empty)"}` } : {}),
       };
@@ -333,6 +378,8 @@ export function parsePickupResponse(body: unknown, wantParts: string[]): StoreAv
       city: s.city ?? null,
       state: s.state ?? null,
       distance: s.storeDistanceWithUnit ?? null,
+      storeHours: storeHoursFor(s),
+      pickupTypeText: s.pickupTypeAvailabilityText ?? null,
       parts,
     };
   });

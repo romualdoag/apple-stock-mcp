@@ -91,11 +91,14 @@ export async function checkAvailability(
           city: null,
           state: null,
           distance: null,
+          storeHours: null,
+          pickupTypeText: null,
           parts: parts.map((partNumber) => ({
             partNumber,
             kind: "unknown" as const,
             pickupDisplay: "",
             quote: null,
+            pickupDay: null,
             productTitle: null,
             reason: err.message,
           })),
@@ -113,6 +116,7 @@ export interface StoreInfo {
   city: string | null;
   state: string | null;
   distance: string | null;
+  storeHours: { days: string; timings: string }[] | null;
 }
 
 /**
@@ -144,6 +148,7 @@ export async function searchStores(
       city: s.city,
       state: s.state,
       distance: s.distance,
+      storeHours: s.storeHours,
     })),
   };
 }

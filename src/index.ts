@@ -40,7 +40,7 @@ server.registerTool(
   "check_product_availability",
   {
     description:
-      "Check right now whether an Apple device is available for store pickup near a location. Give a free-text product ('iPhone 18 Pro Max 512GB') and a location ('Orlando', '32839') or explicit store numbers. Resolves matching variants and reports per-store pickup status (in_stock / out_of_stock / unknown). This is a one-shot query, not a watcher.",
+      "Check right now whether an Apple device is available for store pickup near a location. Give a free-text product ('iPhone 18 Pro Max 512GB') and a location ('Orlando', '32839') or explicit store numbers. Resolves matching variants and reports per-store pickup status (in_stock / out_of_stock / unknown) with pickup day ('Today') and store opening hours. This is a one-shot query, not a watcher. Note: Apple exposes day-level pickup info only — exact pickup time windows are assigned at checkout.",
     inputSchema: {
       product: z.string().describe("Free text or exact part number, e.g. 'iPhone 18 Pro Max 512GB' or 'MJWA4LL/A'."),
       location: locationParam,
@@ -61,7 +61,7 @@ server.registerTool(
   "check_availability",
   {
     description:
-      "Check exact Apple part numbers (e.g. ['MJWA4LL/A']) for pickup availability at explicit stores or near a location. Returns tri-state status per store/part with Apple's pickup quote.",
+      "Check exact Apple part numbers (e.g. ['MJWA4LL/A']) for pickup availability at explicit stores or near a location. Returns tri-state status per store/part with Apple's pickup quote, pickup day and store opening hours.",
     inputSchema: {
       parts: z.array(z.string()).min(1).max(10).describe("Apple part numbers, e.g. ['MJWA4LL/A'] (max 10)."),
       location: locationParam,
@@ -94,7 +94,7 @@ server.registerTool(
   "search_stores",
   {
     description:
-      "List Apple Stores near a location (ZIP, city, or 'City, ST') with store numbers and distances. Use the numbers with check_availability.",
+      "List Apple Stores near a location (ZIP, city, or 'City, ST') with store numbers, distances and opening hours. Use the numbers with check_availability.",
     inputSchema: { location: z.string().describe("ZIP, city, or 'City, ST' — e.g. '32839', 'Orlando, FL'.") },
   },
   async ({ location }) => asText(await searchStores(location)),

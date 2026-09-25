@@ -9,6 +9,7 @@ import {
   CookieJar,
   normalizeStoreNumber,
   parsePickupResponse,
+  pickupDayFromQuote,
   queryPickupRaw,
 } from "../src/apple.js";
 
@@ -49,6 +50,31 @@ describe("parsePickupResponse (Orlando fixture)", () => {
     expect(part.kind).toBe("in_stock");
     expect(part.pickupDisplay).toBe("available");
     expect(part.productTitle).toContain("iPhone 18 Pro");
+  });
+
+  it("exposes pickup day, store hours and pickup text (Orlando fixture)", () => {
+    const stores = parsePickupResponse(fixture, ["MJQ64LL/A"]);
+    const millenia = stores.find((s) => s.storeNumber === "R053")!;
+    // Day granularity from Apple's quote ("Today at Apple Millenia").
+    expect(millenia.parts[0].pickupDay).toBe("Today");
+    // Store opening hours ride along in the same response (no extra fetch).
+    expect(millenia.storeHours).toEqual([
+      { days: "Sun:", timings: "11:00 AM-7:00 PM" },
+      { days: "Mon-Sat:", timings: "10:00 AM-9:00 PM" },
+    ]);
+    expect(millenia.pickupTypeText).toContain("In-Store Pickup");
+    // Unavailable stores carry no pickup day.
+    const out = stores.flatMap((s) => s.parts).filter((p) => p.kind === "out_of_stock");
+    expect(out.length).toBeGreaterThan(0);
+    for (const p of out) expect(p.pickupDay).toBeNull();
+  });
+
+  it("parses pickupDayFromQuote across quote shapes", () => {
+    expect(pickupDayFromQuote("Today at Apple Millenia")).toBe("Today");
+    expect(pickupDayFromQuote("Available Today")).toBe("Today");
+    expect(pickupDayFromQuote("Tomorrow at Apple SoHo")).toBe("Tomorrow");
+    expect(pickupDayFromQuote("Currently unavailable")).toBeNull();
+    expect(pickupDayFromQuote(null)).toBeNull();
   });
 
   it("marks unrequested/missing parts as unknown, never out_of_stock", () => {
