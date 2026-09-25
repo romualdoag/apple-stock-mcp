@@ -1,8 +1,10 @@
 /** Offline tests for catalog parsing + product search (stubbed fetch). */
 import { describe, it, expect } from "vitest";
+import { DEFAULT_REFERER } from "../src/apple.js";
 import {
   asPartNumber,
   extractVariants,
+  refererForCategory,
   searchProducts,
   clearCatalogCache,
 } from "../src/catalog.js";
@@ -38,6 +40,19 @@ describe("asPartNumber", () => {
   it("rejects free text", () => {
     expect(asPartNumber("iPhone 18 Pro Max 512GB")).toBeNull();
     expect(asPartNumber("")).toBeNull();
+  });
+});
+
+describe("refererForCategory", () => {
+  it("returns a matching buy page per family", () => {
+    expect(refererForCategory("iphone")).toContain("/shop/buy-iphone/");
+    expect(refererForCategory("mac")).toContain("/shop/buy-mac/");
+    expect(refererForCategory("watch")).toContain("/shop/buy-watch/");
+  });
+
+  it("falls back to the default referer when unknown", () => {
+    expect(refererForCategory(undefined)).toBe(DEFAULT_REFERER);
+    expect(refererForCategory("toaster")).toBe(DEFAULT_REFERER);
   });
 });
 

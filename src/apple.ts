@@ -25,6 +25,16 @@ export const USER_AGENT =
 /** Network timeout (ms) applied to every Apple fetch. Keeps MCP tools from hanging. */
 export const FETCH_TIMEOUT_MS = 15_000;
 
+/**
+ * Single-retry backoff (ms) after HTTP 429/541 on the pickup query.
+ * Throttle-aware: Apple cools down for 10–15 min after ~30 rapid requests
+ * (see README), so we retry exactly ONCE after a short delay and then
+ * surface `blocked`/`unknown` with the wait guidance — never loop.
+ */
+export const PICKUP_RETRY_DELAY_MS = 1_500;
+/** Cap for a server-sent Retry-After (never stall an MCP tool for minutes). */
+export const PICKUP_RETRY_MAX_DELAY_MS = 5_000;
+
 export type AvailabilityKind = "in_stock" | "out_of_stock" | "unknown";
 
 export interface PartAvailability {
@@ -91,12 +101,17 @@ export interface QueryScope {
   location?: string;
 }
 
+/** Canonical Apple Store number: trimmed + uppercase (r053 -> R053). */
+export function normalizeStoreNumber(s: string): string {
+  return s.trim().toUpperCase();
+}
+
 /** Build the pickup-message URL for the given scope + parts. */
 export function buildPickupUrl(parts: string[], scope: QueryScope): string {
   const params = new URLSearchParams();
   params.set("pl", "true");
   params.set("mts.0", "regular");
-  if (scope.store) params.set("store", scope.store);
+  if (scope.store) params.set("store", normalizeStoreNumber(scope.store));
   else if (scope.location) params.set("location", scope.location);
   else throw new AppleApiError("transport", "Either store or location is required");
   parts.forEach((p, i) => params.set(`parts.${i}`, p));
@@ -136,41 +151,72 @@ function pickupHeaders(jar: CookieJar, referer: string): Record<string, string> 
   return headers;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Honor Retry-After (seconds) when present, capped so MCP tools never stall. */
+function retryDelayFrom(res: Response, fallbackMs: number): number {
+  const raw = res.headers?.get?.("retry-after");
+  if (raw != null) {
+    const secs = Number(raw);
+    if (Number.isFinite(secs) && secs > 0) return Math.min(secs * 1000, PICKUP_RETRY_MAX_DELAY_MS);
+  }
+  return fallbackMs;
+}
+
 /**
  * Run one pickup-message query. Returns the raw parsed JSON.
  * Throws AppleApiError on blocks (HTTP 541/5xx/429), transport failures,
  * or non-JSON responses.
+ *
+ * Throttle policy: exactly ONE retry after HTTP 429/541 (short backoff,
+ * honors Retry-After up to a cap). Anything persistent becomes `blocked`
+ * with the 10–15 min cooldown guidance — the caller maps it to `unknown`.
  */
 export async function queryPickupRaw(
   parts: string[],
   scope: QueryScope,
-  opts: { jar?: CookieJar; referer?: string; fetchFn?: FetchFn } = {},
+  opts: { jar?: CookieJar; referer?: string; fetchFn?: FetchFn; retryDelayMs?: number } = {},
 ): Promise<unknown> {
   if (parts.length === 0) throw new AppleApiError("transport", "parts list is empty");
   const jar = opts.jar ?? new CookieJar();
   const referer = opts.referer ?? DEFAULT_REFERER;
   const fetchFn = opts.fetchFn ?? fetch;
+  const retryDelayMs = opts.retryDelayMs ?? PICKUP_RETRY_DELAY_MS;
 
   if (jar.size === 0) await warmCookies(jar, fetchFn, referer);
 
   const url = buildPickupUrl(parts, scope);
-  let res: Response;
-  try {
-    res = await fetchFn(url, {
-      headers: pickupHeaders(jar, referer),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "TimeoutError") {
-      throw new AppleApiError("transport", `Apple query timed out after ${FETCH_TIMEOUT_MS}ms`);
+  const doFetch = async (): Promise<Response> => {
+    try {
+      return await fetchFn(url, {
+        headers: pickupHeaders(jar, referer),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "TimeoutError") {
+        throw new AppleApiError("transport", `Apple query timed out after ${FETCH_TIMEOUT_MS}ms`);
+      }
+      // Node <22 / undici surfaces AbortSignal.timeout as AbortError.
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new AppleApiError("transport", `Apple query timed out after ${FETCH_TIMEOUT_MS}ms`);
+      }
+      throw new AppleApiError("transport", `Network failure querying Apple: ${String(err)}`);
     }
-    // Node <22 / undici surfaces AbortSignal.timeout as AbortError.
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new AppleApiError("transport", `Apple query timed out after ${FETCH_TIMEOUT_MS}ms`);
-    }
-    throw new AppleApiError("transport", `Network failure querying Apple: ${String(err)}`);
-  }
+  };
+
+  let res = await doFetch();
   jar.storeFromHeaders(res.headers);
+
+  if (res.status === 541 || res.status === 429) {
+    // Single retry only — then fall through to the blocked error below.
+    await res.arrayBuffer().catch(() => undefined);
+    const delay = retryDelayFrom(res, retryDelayMs);
+    if (delay > 0) await sleep(delay);
+    res = await doFetch();
+    jar.storeFromHeaders(res.headers);
+  }
 
   if (res.status === 541 || res.status === 429 || res.status >= 500) {
     throw new AppleApiError(

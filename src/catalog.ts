@@ -7,7 +7,7 @@
  *    "category":"iphone","name":"iPhone 18 Pro Max 512GB Burgundy"}
  */
 
-import { APPLE_BASE_URL, FETCH_TIMEOUT_MS, USER_AGENT, type FetchFn } from "./apple.js";
+import { APPLE_BASE_URL, DEFAULT_REFERER, FETCH_TIMEOUT_MS, USER_AGENT, type FetchFn } from "./apple.js";
 
 export interface FamilyPage {
   category: "iphone" | "ipad" | "mac" | "watch" | "accessory";
@@ -45,6 +45,17 @@ export interface Variant {
   price: number | null;
   family: string;
   url: string;
+}
+
+/**
+ * Family-aware Referer for pickup queries: first buy page of the category,
+ * else the iPhone default. Apple doesn't strictly validate it, but a
+ * matching referer looks like a real buy-page flow (e.g. Mac parts with a
+ * Mac buy-page referer instead of an iPhone one).
+ */
+export function refererForCategory(category?: string): string {
+  const c = (category ?? "").trim().toLowerCase();
+  return FAMILY_PAGES.find((p) => p.category === c)?.url ?? DEFAULT_REFERER;
 }
 
 /**

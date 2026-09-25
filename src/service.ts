@@ -8,12 +8,13 @@ import {
   AppleApiError,
   CookieJar,
   DEFAULT_REFERER,
+  normalizeStoreNumber,
   parsePickupResponse,
   queryPickupRaw,
   type FetchFn,
   type StoreAvailability,
 } from "./apple.js";
-import { asPartNumber, searchProducts } from "./catalog.js";
+import { asPartNumber, refererForCategory, searchProducts } from "./catalog.js";
 
 /**
  * Process-wide cookie jar, shared by all queries.
@@ -56,30 +57,33 @@ function summarize(
 export async function checkAvailability(
   parts: string[],
   scope: { stores?: string[]; location?: string },
-  opts: { referer?: string; fetchFn?: FetchFn } = {},
+  opts: { referer?: string; fetchFn?: FetchFn; retryDelayMs?: number } = {},
 ): Promise<AvailabilitySummary> {
   const fetchFn = opts.fetchFn ?? fetch;
   const referer = opts.referer ?? DEFAULT_REFERER;
+  const retryDelayMs = opts.retryDelayMs;
   if (parts.length === 0) throw new Error("parts must not be empty");
+  // Canonical store numbers (r053 -> R053) so scope, URLs and summaries agree.
+  const storeList = (scope.stores ?? []).map((s) => normalizeStoreNumber(s));
 
   try {
-    if (scope.stores && scope.stores.length > 0) {
+    if (storeList.length > 0) {
       const all: StoreAvailability[] = [];
-      for (const store of scope.stores) {
-        const raw = await queryPickupRaw(parts, { store }, { jar, referer, fetchFn });
+      for (const store of storeList) {
+        const raw = await queryPickupRaw(parts, { store }, { jar, referer, fetchFn, retryDelayMs });
         all.push(...parsePickupResponse(raw, parts));
       }
-      return summarize(all, parts, { stores: scope.stores });
+      return summarize(all, parts, { stores: storeList });
     }
     if (scope.location) {
-      const raw = await queryPickupRaw(parts, { location: scope.location }, { jar, referer, fetchFn });
+      const raw = await queryPickupRaw(parts, { location: scope.location }, { jar, referer, fetchFn, retryDelayMs });
       return summarize(parsePickupResponse(raw, parts), parts, { location: scope.location });
     }
     throw new Error("Either stores or location is required");
   } catch (err) {
     if (err instanceof AppleApiError) {
       // Whole-query failure: report one unknown entry per requested part.
-      const label = scope.stores?.join(",") ?? scope.location ?? "?";
+      const label = storeList.length > 0 ? storeList.join(",") : (scope.location ?? "?");
       const stores: StoreAvailability[] = [
         {
           storeNumber: label,
@@ -118,9 +122,10 @@ export interface StoreInfo {
  */
 export async function searchStores(
   location: string,
-  opts: { probePart?: string; fetchFn?: FetchFn } = {},
+  opts: { probePart?: string; fetchFn?: FetchFn; retryDelayMs?: number } = {},
 ): Promise<{ location: string; stores: StoreInfo[]; probePart: string }> {
   const fetchFn = opts.fetchFn ?? fetch;
+  const retryDelayMs = opts.retryDelayMs;
   let probePart = opts.probePart ?? asPartNumber(location) ?? "";
   if (!probePart) {
     // Resolve a probe from the live catalog (first iPhone 18 Pro variant).
@@ -128,7 +133,7 @@ export async function searchStores(
     probePart = found.matches[0]?.partNumber ?? "";
   }
   if (!probePart) throw new Error("Could not resolve a probe part to list stores");
-  const raw = await queryPickupRaw([probePart], { location }, { jar, fetchFn });
+  const raw = await queryPickupRaw([probePart], { location }, { jar, fetchFn, retryDelayMs });
   const parsed = parsePickupResponse(raw, [probePart]);
   return {
     location,
@@ -158,7 +163,7 @@ export interface ProductCheckResult {
 export async function checkProductAvailability(
   productQuery: string,
   scope: { location?: string; stores?: string[] },
-  opts: { category?: string; maxVariants?: number; fetchFn?: FetchFn; exactParts?: string[] } = {},
+  opts: { category?: string; maxVariants?: number; fetchFn?: FetchFn; exactParts?: string[]; retryDelayMs?: number } = {},
 ): Promise<ProductCheckResult> {
   const fetchFn = opts.fetchFn ?? fetch;
   let resolved: { partNumber: string; name: string }[];
@@ -203,7 +208,7 @@ export async function checkProductAvailability(
   const availability = await checkAvailability(
     resolved.map((r) => r.partNumber),
     scope,
-    { referer: DEFAULT_REFERER, fetchFn },
+    { referer: refererForCategory(opts.category), fetchFn, retryDelayMs: opts.retryDelayMs },
   );
   return { query: productQuery, resolvedParts: resolved, availability, note };
 }

@@ -35,10 +35,11 @@ never silently as `out_of_stock`.
 npm install
 npm run build
 npm start          # stdio MCP server
-npm test           # build + vitest (offline + live)
+npm test           # build + vitest (offline; live tests skip unless LIVE=1)
+LIVE=1 npm run test:live  # inclui os testes live contra apple.com
 ```
 
-Live tests hit `apple.com`; offline tests use fixtures in `tests/fixtures/`.
+Live tests hit `apple.com` only when `LIVE=1`; offline tests use fixtures in `tests/fixtures/`.
 
 ## Hermes
 
@@ -53,5 +54,7 @@ mcp_servers:
 
 - Apple throttles pickup queries per egress IP (~30 rapid requests → HTTP 541
   cooldown of 10–15 min). Don't loop; one query per question.
+  The client retries once on 429/541 (short backoff, capped Retry-After);
+  persistent blocks surface as `unknown` with the cooldown guidance.
 - US storefront only (`www.apple.com`). Other regions need their base URL.
 - New models: add the buy page slug to `FAMILY_PAGES` in `src/catalog.ts`.

@@ -29,7 +29,8 @@ const locationParam = z
   .describe("ZIP code, city, or 'City, ST' — e.g. '32839', 'Orlando', 'Orlando, FL'.");
 const storeNumber = z
   .string()
-  .regex(/^R\d+$/i, "Store number must look like R053");
+  .regex(/^R\d+$/i, "Store number must look like R053")
+  .transform((s) => s.trim().toUpperCase());
 const storesParam = z
   .array(storeNumber)
   .optional()

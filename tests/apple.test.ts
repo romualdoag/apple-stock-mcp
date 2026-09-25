@@ -6,7 +6,10 @@ import { dirname, join } from "node:path";
 import {
   AppleApiError,
   buildPickupUrl,
+  CookieJar,
+  normalizeStoreNumber,
   parsePickupResponse,
+  queryPickupRaw,
 } from "../src/apple.js";
 
 const dir = dirname(fileURLToPath(import.meta.url));
@@ -104,5 +107,80 @@ describe("parsePickupResponse (Orlando fixture)", () => {
 
   it("throws a parse error when stores are absent", () => {
     expect(() => parsePickupResponse({ head: {}, body: {} }, ["X"])).toThrow(AppleApiError);
+  });
+});
+
+describe("normalizeStoreNumber", () => {
+  it("uppercases lowercase store numbers", () => {
+    expect(normalizeStoreNumber("r053")).toBe("R053");
+    expect(normalizeStoreNumber("  r143 ")).toBe("R143");
+  });
+
+  it("builds pickup URLs with canonical store numbers", () => {
+    const url = buildPickupUrl(["MJWA4LL/A"], { store: "r053" });
+    expect(url).toContain("store=R053");
+  });
+});
+
+describe("queryPickupRaw retry (stubbed)", () => {
+  const okBody = JSON.stringify({ body: { stores: [] } });
+  const json = () =>
+    new Response(okBody, { status: 200, headers: { "Content-Type": "application/json" } });
+
+  /** Stub fetch: warmup URLs pass through, pickup URLs follow a script. */
+  const scriptedFetch = (script: number[], counter: { pickup: number }) =>
+    (async (url: unknown) => {
+      if (!String(url).includes("pickup-message")) {
+        return new Response("", { status: 200 });
+      }
+      const status = script[Math.min(counter.pickup, script.length - 1)];
+      counter.pickup++;
+      return status === 200 ? json() : new Response("busy", { status });
+    }) as typeof fetch;
+
+  it("retries once after 429 and then succeeds", async () => {
+    const counter = { pickup: 0 };
+    const body = await queryPickupRaw(["MJQ64LL/A"], { store: "R053" }, {
+      jar: new CookieJar(),
+      fetchFn: scriptedFetch([429, 200], counter),
+      retryDelayMs: 0,
+    });
+    expect(counter.pickup).toBe(2);
+    expect(body).toEqual({ body: { stores: [] } });
+  });
+
+  it("retries once after 541 and then succeeds", async () => {
+    const counter = { pickup: 0 };
+    await queryPickupRaw(["MJQ64LL/A"], { store: "R053" }, {
+      jar: new CookieJar(),
+      fetchFn: scriptedFetch([541, 200], counter),
+      retryDelayMs: 0,
+    });
+    expect(counter.pickup).toBe(2);
+  });
+
+  it("gives up after exactly one retry with the cooldown guidance", async () => {
+    const counter = { pickup: 0 };
+    await expect(
+      queryPickupRaw(["MJQ64LL/A"], { store: "R053" }, {
+        jar: new CookieJar(),
+        fetchFn: scriptedFetch([429, 429], counter),
+        retryDelayMs: 0,
+      }),
+    ).rejects.toThrow(/10-15 minutes/);
+    // One initial attempt + one retry — never a loop.
+    expect(counter.pickup).toBe(2);
+  });
+
+  it("does not retry other 5xx responses", async () => {
+    const counter = { pickup: 0 };
+    await expect(
+      queryPickupRaw(["MJQ64LL/A"], { store: "R053" }, {
+        jar: new CookieJar(),
+        fetchFn: scriptedFetch([500, 200], counter),
+        retryDelayMs: 0,
+      }),
+    ).rejects.toThrow(AppleApiError);
+    expect(counter.pickup).toBe(1);
   });
 });

@@ -1,8 +1,16 @@
-/** Live tests against www.apple.com (needs network; no credentials). */
+/**
+ * Live tests against www.apple.com (needs network; no credentials).
+ *
+ * Opt-in only: skipped unless LIVE=1, so `npm test` stays offline.
+ *   npm test              # offline (fixtures + stubs)
+ *   LIVE=1 npm run test:live  # hits apple.com
+ */
 import { describe, it, expect } from "vitest";
 import { checkAvailability, checkProductAvailability, searchStores } from "../src/service.js";
 
-describe("live: searchStores", () => {
+const LIVE = process.env.LIVE === "1";
+
+describe.skipIf(!LIVE)("live: searchStores", () => {
   it("lists Orlando stores including Millenia R053", async () => {
     const r = await searchStores("32839", { probePart: "MJQ64LL/A" });
     const numbers = r.stores.map((s) => s.storeNumber);
@@ -13,7 +21,7 @@ describe("live: searchStores", () => {
   }, 60_000);
 });
 
-describe("live: checkAvailability", () => {
+describe.skipIf(!LIVE)("live: checkAvailability", () => {
   it("returns tri-state status for a real part at a real store", async () => {
     const r = await checkAvailability(["MJQ64LL/A"], { stores: ["R053"] });
     expect(r.stores).toHaveLength(1);
@@ -24,7 +32,7 @@ describe("live: checkAvailability", () => {
   }, 60_000);
 });
 
-describe("live: checkProductAvailability", () => {
+describe.skipIf(!LIVE)("live: checkProductAvailability", () => {
   it("resolves iPhone 18 Pro Max 512GB near Orlando and reports per-store status", async () => {
     const r = await checkProductAvailability("iPhone 18 Pro Max 512GB", { location: "Orlando" });
     expect(r.resolvedParts.length).toBeGreaterThan(0);

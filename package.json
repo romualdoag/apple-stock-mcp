@@ -14,7 +14,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "npm run build && vitest run"
+    "test": "npm run build && vitest run",
+    "test:live": "npm run build && LIVE=1 vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
