@@ -15,6 +15,15 @@ import {
 } from "./apple.js";
 import { asPartNumber, searchProducts } from "./catalog.js";
 
+/**
+ * Process-wide cookie jar, shared by all queries.
+ *
+ * Intentional (not a leak): Apple only returns pickup data after a buy-page
+ * visit sets cookies, so warming once and reusing them avoids an extra
+ * round-trip per query. The jar holds anonymous session cookies only (no
+ * auth), and Map get/set are synchronous, so concurrent queries are safe —
+ * worst case two queries warm redundantly.
+ */
 const jar = new CookieJar();
 
 export interface AvailabilitySummary {
@@ -177,6 +186,11 @@ export async function checkProductAvailability(
     }
     // Keep only top-score matches to avoid checking unrelated variants.
     const top = found.matches[0].score;
+    if (top === 0) {
+      throw new Error(
+        `No products matched "${productQuery}"${found.pagesFailed.length ? ` (${found.pagesFailed.length} catalog pages failed to load)` : ""}`,
+      );
+    }
     resolved = found.matches
       .filter((m) => m.score === top)
       .slice(0, opts.maxVariants ?? 6)
@@ -186,17 +200,10 @@ export async function checkProductAvailability(
     }
   }
 
-  const refererHint = await refererFor(resolved[0]?.partNumber, fetchFn).catch(() => DEFAULT_REFERER);
   const availability = await checkAvailability(
     resolved.map((r) => r.partNumber),
     scope,
-    { referer: refererHint, fetchFn },
+    { referer: DEFAULT_REFERER, fetchFn },
   );
   return { query: productQuery, resolvedParts: resolved, availability, note };
-}
-
-async function refererFor(_part: string | undefined, _fetchFn: FetchFn): Promise<string> {
-  // The buy-iphone hub works as a referer for all iPhone parts; keep the
-  // default unless catalog search told us otherwise in the future.
-  return DEFAULT_REFERER;
 }

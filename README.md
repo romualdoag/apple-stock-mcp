@@ -46,7 +46,7 @@ Live tests hit `apple.com`; offline tests use fixtures in `tests/fixtures/`.
 mcp_servers:
   apple-stock:
     command: "node"
-    args: ["/home/hermes/apple-stock-mcp/dist/index.js"]
+    args: ["/home/hermes/github/apple-stock-mcp/dist/index.js"]
 ```
 
 ## Notes

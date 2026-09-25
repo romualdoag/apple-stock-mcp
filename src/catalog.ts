@@ -7,7 +7,7 @@
  *    "category":"iphone","name":"iPhone 18 Pro Max 512GB Burgundy"}
  */
 
-import { APPLE_BASE_URL, USER_AGENT, type FetchFn } from "./apple.js";
+import { APPLE_BASE_URL, FETCH_TIMEOUT_MS, USER_AGENT, type FetchFn } from "./apple.js";
 
 export interface FamilyPage {
   category: "iphone" | "ipad" | "mac" | "watch" | "accessory";
@@ -83,9 +83,18 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 export async function fetchBuyPage(page: FamilyPage, fetchFn: FetchFn = fetch): Promise<string> {
   const cached = fetchCache.get(page.url);
   if (cached && cached.expires > Date.now()) return cached.html;
-  const res = await fetchFn(page.url, {
-    headers: { "User-Agent": USER_AGENT, Accept: "text/html,*/*" },
-  });
+  let res: Response;
+  try {
+    res = await fetchFn(page.url, {
+      headers: { "User-Agent": USER_AGENT, Accept: "text/html,*/*" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")) {
+      throw new Error(`Buy page ${page.slug} timed out after ${FETCH_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  }
   if (!res.ok) throw new Error(`Buy page ${page.slug} returned HTTP ${res.status}`);
   const html = await res.text();
   fetchCache.set(page.url, { html, expires: Date.now() + CACHE_TTL_MS });

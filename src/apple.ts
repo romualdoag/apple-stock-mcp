@@ -22,6 +22,9 @@ export const DEFAULT_REFERER = `${APPLE_BASE_URL}/shop/buy-iphone/iphone-18-pro`
 export const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+/** Network timeout (ms) applied to every Apple fetch. Keeps MCP tools from hanging. */
+export const FETCH_TIMEOUT_MS = 15_000;
+
 export type AvailabilityKind = "in_stock" | "out_of_stock" | "unknown";
 
 export interface PartAvailability {
@@ -109,13 +112,14 @@ export async function warmCookies(
   try {
     const res = await fetchFn(referer, {
       headers: { "User-Agent": USER_AGENT, Accept: "text/html,*/*" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     jar.storeFromHeaders(res.headers);
     // Drain body so the connection can be reused.
     await res.arrayBuffer().catch(() => undefined);
   } catch {
     // Warmup is best-effort; the query still goes out and any failure
-    // surfaces as `unknown` downstream.
+    // surfaces as `unknown` downstream (including timeouts here).
   }
 }
 
@@ -152,8 +156,18 @@ export async function queryPickupRaw(
   const url = buildPickupUrl(parts, scope);
   let res: Response;
   try {
-    res = await fetchFn(url, { headers: pickupHeaders(jar, referer) });
+    res = await fetchFn(url, {
+      headers: pickupHeaders(jar, referer),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
   } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      throw new AppleApiError("transport", `Apple query timed out after ${FETCH_TIMEOUT_MS}ms`);
+    }
+    // Node <22 / undici surfaces AbortSignal.timeout as AbortError.
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new AppleApiError("transport", `Apple query timed out after ${FETCH_TIMEOUT_MS}ms`);
+    }
     throw new AppleApiError("transport", `Network failure querying Apple: ${String(err)}`);
   }
   jar.storeFromHeaders(res.headers);
@@ -264,7 +278,7 @@ export function parsePickupResponse(body: unknown, wantParts: string[]): StoreAv
         pickupDisplay: display,
         quote,
         productTitle: title,
-        ...(kind === "unknown" ? { reason: `Unrecognized pickupDisplay value: ${display!}` } : {}),
+        ...(kind === "unknown" ? { reason: `Unrecognized pickupDisplay value: ${display || "(empty)"}` } : {}),
       };
     });
     return {

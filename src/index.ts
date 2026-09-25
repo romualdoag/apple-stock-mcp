@@ -19,12 +19,19 @@ function asText(obj: unknown): TextResult {
   return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
 }
 
+const categoryParam = z
+  .enum(["iphone", "ipad", "mac", "watch", "accessory"])
+  .optional()
+  .describe("Hint to narrow catalog search: iphone, ipad, mac, watch, accessory.");
 const locationParam = z
   .string()
   .optional()
   .describe("ZIP code, city, or 'City, ST' — e.g. '32839', 'Orlando', 'Orlando, FL'.");
+const storeNumber = z
+  .string()
+  .regex(/^R\d+$/i, "Store number must look like R053");
 const storesParam = z
-  .array(z.string())
+  .array(storeNumber)
   .optional()
   .describe("Explicit Apple Store numbers, e.g. ['R053', 'R143']. Takes precedence over location.");
 
@@ -37,8 +44,8 @@ server.registerTool(
       product: z.string().describe("Free text or exact part number, e.g. 'iPhone 18 Pro Max 512GB' or 'MJWA4LL/A'."),
       location: locationParam,
       stores: storesParam,
-      category: z.string().optional().describe("Hint to narrow catalog search: iphone, ipad, mac, watch."),
-      maxVariants: z.number().int().positive().optional().describe("Max matching variants to check (default 6)."),
+      category: categoryParam,
+      maxVariants: z.coerce.number().int().min(1).max(20).optional().describe("Max matching variants to check (default 6, max 20)."),
     },
   },
   async ({ product, location, stores, category, maxVariants }) => {
@@ -55,7 +62,7 @@ server.registerTool(
     description:
       "Check exact Apple part numbers (e.g. ['MJWA4LL/A']) for pickup availability at explicit stores or near a location. Returns tri-state status per store/part with Apple's pickup quote.",
     inputSchema: {
-      parts: z.array(z.string()).min(1).describe("Apple part numbers, e.g. ['MJWA4LL/A']."),
+      parts: z.array(z.string()).min(1).max(10).describe("Apple part numbers, e.g. ['MJWA4LL/A'] (max 10)."),
       location: locationParam,
       stores: storesParam,
     },
@@ -75,8 +82,8 @@ server.registerTool(
       "Find Apple part numbers matching free text ('iPhone 18 Pro Max 512GB') across the current US lineup. Use the returned part numbers with check_availability.",
     inputSchema: {
       query: z.string().describe("Free-text product query."),
-      category: z.string().optional().describe("iphone, ipad, mac, watch."),
-      limit: z.number().int().positive().optional().describe("Max results (default 10)."),
+      category: categoryParam,
+      limit: z.coerce.number().int().min(1).max(50).optional().describe("Max results (default 10, max 50)."),
     },
   },
   async ({ query, category, limit }) => asText(await searchProducts(query, { category, limit })),
