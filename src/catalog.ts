@@ -8,6 +8,7 @@
  */
 
 import { APPLE_BASE_URL, DEFAULT_REFERER, FETCH_TIMEOUT_MS, USER_AGENT, type FetchFn } from "./apple.js";
+import { clearCatalogEntries, getCatalogEntry, setCatalogEntry } from "./catalogCache.js";
 
 export interface FamilyPage {
   category: "iphone" | "ipad" | "mac" | "watch" | "accessory";
@@ -88,12 +89,14 @@ export function extractVariants(html: string, family: string, url: string): Vari
   return [...seen.values()];
 }
 
-const fetchCache = new Map<string, { html: string; expires: number }>();
-const CACHE_TTL_MS = 10 * 60 * 1000;
-
+/**
+ * Buy-page HTML com cache FRIO (SQLite kv_cache, chave `catalog:<slug>`,
+ * TTL `APPLE_CATALOG_TTL_HOURS`, default 7 dias). Disponibilidade pickup
+ * NUNCA passa por aqui — checkAvailability é sempre live.
+ */
 export async function fetchBuyPage(page: FamilyPage, fetchFn: FetchFn = fetch): Promise<string> {
-  const cached = fetchCache.get(page.url);
-  if (cached && cached.expires > Date.now()) return cached.html;
+  const cold = getCatalogEntry(page.slug);
+  if (cold) return cold.html;
   let res: Response;
   try {
     res = await fetchFn(page.url, {
@@ -108,12 +111,17 @@ export async function fetchBuyPage(page: FamilyPage, fetchFn: FetchFn = fetch): 
   }
   if (!res.ok) throw new Error(`Buy page ${page.slug} returned HTTP ${res.status}`);
   const html = await res.text();
-  fetchCache.set(page.url, { html, expires: Date.now() + CACHE_TTL_MS });
+  // Grava html + variants juntos no frio (fail-soft quando desligado).
+  try {
+    setCatalogEntry(page.slug, html, extractVariants(html, page.slug, page.url));
+  } catch {
+    /* fail-soft: fetch já rendeu o html */
+  }
   return html;
 }
 
 export function clearCatalogCache(): void {
-  fetchCache.clear();
+  clearCatalogEntries();
 }
 
 function normalize(s: string): string {

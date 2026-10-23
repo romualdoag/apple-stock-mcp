@@ -59,6 +59,8 @@ export async function checkAvailability(
   scope: { stores?: string[]; location?: string },
   opts: { referer?: string; fetchFn?: FetchFn; retryDelayMs?: number } = {},
 ): Promise<AvailabilitySummary> {
+  // QUENTE: disponibilidade pickup é SEMPRE live — nunca passa pelo cache
+  // frio do catálogo (src/catalogCache.ts). Staleness aqui prejudica decisão.
   const fetchFn = opts.fetchFn ?? fetch;
   const referer = opts.referer ?? DEFAULT_REFERER;
   const retryDelayMs = opts.retryDelayMs;
