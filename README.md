@@ -29,6 +29,23 @@ never silently as `out_of_stock`.
 - Product resolution parses the embedded variant JSON on Apple's buy pages
   (`partNumber` ↔ `name`, e.g. `MJWA4LL/A` ↔ `iPhone 18 Pro Max 512GB Burgundy`).
 
+## Cache: quente vs frio
+
+- **Quente (sempre live):** `checkAvailability` (pickup-message) nunca usa
+  cache — cada chamada vai ao upstream. Staleness aqui prejudica decisão.
+- **Frio (SQLite `kv_cache`, 7 dias):** buy-page HTML + variants extraídos,
+  chave `catalog:<slug>`, TTL `APPLE_CATALOG_TTL_HOURS` (default 168).
+  Evita refazer o listing a cada restart; o status continua vindo do live.
+
+```bash
+APPLE_CACHE_PATH=./catalog-cache.sqlite  # default (git-ignored)
+APPLE_CACHE_ENABLED=0                    # bypass total, fail-soft
+APPLE_CATALOG_TTL_HOURS=168              # 7 dias
+```
+
+Qualquer erro de SQLite desliga o cache e segue direto pro upstream
+(fail-soft). O banco (`*.sqlite*`) nunca é commitado.
+
 ## Run
 
 ```bash
