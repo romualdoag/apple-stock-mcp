@@ -11,7 +11,12 @@ import type { Variant } from "./catalog.js";
  * - FRIO: buy-page HTML + variants extraídos vão pro SQLite com TTL longo
  *   (default 7 dias). Catálogo muda poucas vezes/ano; status vem do live.
  *
- * Chave: `catalog:<slug>` → { html, variants, fetchedAt }.
+ * Chave: `v1:catalog:<slug>` → { html, variants, fetchedAt }, onde <slug> é
+ * normalizado (trim + lowercase) e aliases de lineup resolvidos
+ * (CATALOG_SLUG_ALIASES). Leitura cai pro fallback da chave legada
+ * `catalog:<slug>` e migra o hit pra chave v1. Hit servido só após
+ * validação barata; se inválido, invalida em vez de servir stale.
+ *
  * Fail-soft: qualquer erro de SQLite (cwd read-only, lock, schema) desliga
  * o cache e segue direto pro upstream. Cache nunca quebra chamada.
  * Banco local nunca commitado (`*.sqlite*` no .gitignore).
@@ -22,6 +27,22 @@ export interface CatalogCacheEntry {
   variants: Variant[];
   fetchedAt: string;
 }
+
+/** Versão do esquema das chaves de catálogo (bump = invalida o frio). */
+export const CATALOG_CACHE_VERSION = "v1";
+
+/**
+ * Alias de slugs renomeados entre lineups: nome antigo → slug atual.
+ * Pequeno e editável — ao trocar de lineup, mapeie aqui a página da
+ * geração anterior pra página que a substitui (mesmo tier), sem mexer
+ * no resto do código.
+ */
+export const CATALOG_SLUG_ALIASES: Record<string, string> = {
+  "iphone-17-pro": "iphone-18-pro",
+  "iphone-16": "iphone-17",
+  "apple-watch-series-10": "apple-watch",
+  "apple-watch-ultra-2": "apple-watch-ultra",
+};
 
 let dbPathOverride: string | undefined;
 let db: DatabaseSync | null = null;
@@ -98,44 +119,166 @@ export function kvGet(key: string, ttlHours: number): unknown | undefined {
   }
 }
 
-/** Grava no KV (fail-soft). */
-export function kvSet(key: string, value: unknown): void {
+function kvSetAt(key: string, value: unknown, fetchedAt: string): void {
   const store = getDb();
   if (!store) return;
   try {
     ensureKvTable(store);
     store
       .prepare("INSERT OR REPLACE INTO kv_cache (key, value_json, fetched_at) VALUES (?, ?, ?)")
-      .run(key, JSON.stringify(value), new Date().toISOString());
+      .run(key, JSON.stringify(value), fetchedAt);
   } catch {
     /* fail-soft */
   }
 }
 
+/** Grava no KV (fail-soft). */
+export function kvSet(key: string, value: unknown): void {
+  kvSetAt(key, value, new Date().toISOString());
+}
+
+/** Apaga uma chave do KV (fail-soft). Usado pra invalidar hit divergente. */
+export function kvDelete(key: string): void {
+  const store = getDb();
+  if (!store) return;
+  try {
+    ensureKvTable(store);
+    store.prepare("DELETE FROM kv_cache WHERE key = ?").run(key);
+  } catch {
+    /* fail-soft */
+  }
+}
+
+/** Normaliza slug pra chave: trim + lowercase. */
+export function normalizeSlug(slug: string): string {
+  return slug.trim().toLowerCase();
+}
+
+/**
+ * Resolve alias de lineup (nome antigo → slug atual), com guarda contra
+ * ciclos. Slugs mudam a cada lineup (`iphone-18-pro` → `iphone-19-pro`);
+ * part numbers são o identificador estável — o alias só evita miss frio.
+ */
+export function resolveSlug(slug: string): string {
+  let cur = normalizeSlug(slug);
+  const seen = new Set<string>([cur]);
+  for (let i = 0; i < 8; i++) {
+    const next = CATALOG_SLUG_ALIASES[cur];
+    if (!next) return cur;
+    const norm = normalizeSlug(next);
+    if (seen.has(norm)) return cur; // ciclo no mapa: para no último são
+    seen.add(norm);
+    cur = norm;
+  }
+  return cur;
+}
+
+/** Chave atual: versionada + normalizada + alias resolvido. */
 export function catalogKey(slug: string): string {
-  return `catalog:${slug}`;
+  return `${CATALOG_CACHE_VERSION}:catalog:${resolveSlug(slug)}`;
 }
 
-/** Lê buy-page do frio se fresca; `undefined` = miss/expirada/desligada. */
-export function getCatalogEntry(slug: string): CatalogCacheEntry | undefined {
-  const raw = kvGet(catalogKey(slug), catalogCacheTtlHours()) as CatalogCacheEntry | undefined;
-  if (!raw || typeof raw.html !== "string" || !Array.isArray(raw.variants)) return undefined;
-  return raw;
+/**
+ * Chave legada (pré-v1, sem versão): só leitura com fallback + migração.
+ * Nunca grave nela — `setCatalogEntry` sempre usa `catalogKey()`.
+ */
+export function legacyCatalogKey(slug: string): string {
+  return `catalog:${resolveSlug(slug)}`;
 }
 
-/** Grava buy-page (html + variants) no frio (fail-soft). */
+function isEntryShape(raw: unknown): raw is CatalogCacheEntry {
+  if (!raw || typeof raw !== "object") return false;
+  const e = raw as { html?: unknown; variants?: unknown };
+  return typeof e.html === "string" && Array.isArray(e.variants);
+}
+
+const PART_RE = /^[A-Z0-9]{3,8}\/A$/;
+
+/**
+ * Validação barata de um hit, sem rede: todo part number guardado precisa
+ * ser bem-formado e ainda constar no html guardado. `false` = html
+ * corrompido ou parser à deriva → invalide em vez de servir.
+ * (Lista vazia passa: página sem variants é plausível e refetch repetiria
+ * o mesmo resultado — sem prova de stale, serve.)
+ */
+export function validateCatalogEntry(entry: CatalogCacheEntry): boolean {
+  if (!isEntryShape(entry)) return false;
+  return entry.variants.every(
+    (v) =>
+      typeof v?.partNumber === "string" && PART_RE.test(v.partNumber) && entry.html.includes(v.partNumber),
+  );
+}
+
+export interface GetCatalogEntryOpts {
+  /**
+   * Validação contra o catálogo atual quando houver refresh barato em mãos
+   * (ex. comparar part numbers com uma lista recém-obtida). Retornou
+   * `false` → invalida a chave em vez de servir stale.
+   */
+  validate?: (entry: CatalogCacheEntry) => boolean;
+}
+
+/**
+ * Lê buy-page do frio se fresca; `undefined` = miss/expirada/desligada.
+ * Ordem: chave v1 → legada do slug canônico → legada do slug cru
+ * (migra o hit pra v1 preservando `fetchedAt`, sem renovar TTL).
+ */
+export function getCatalogEntry(slug: string, opts: GetCatalogEntryOpts = {}): CatalogCacheEntry | undefined {
+  const ttl = catalogCacheTtlHours();
+  const canonical = resolveSlug(slug);
+  const rawNorm = normalizeSlug(slug);
+  const current = catalogKey(slug);
+  const candidates = [
+    current,
+    legacyCatalogKey(slug),
+    ...(rawNorm === canonical ? [] : [`catalog:${rawNorm}`]),
+  ];
+  for (const key of candidates) {
+    const raw = kvGet(key, ttl) as CatalogCacheEntry | undefined;
+    if (!isEntryShape(raw)) continue;
+    if (opts.validate) {
+      let ok = false;
+      try {
+        ok = opts.validate(raw);
+      } catch {
+        ok = true; // fail-soft: validador quebrou não derruba o hit
+      }
+      if (!ok) {
+        kvDelete(key);
+        return undefined;
+      }
+    }
+    if (key !== current) {
+      // Migra pra chave v1 preservando a idade original (sem renovar TTL).
+      kvSetAt(current, raw, raw.fetchedAt);
+      kvDelete(key);
+    }
+    return raw;
+  }
+  return undefined;
+}
+
+/** Grava buy-page (html + variants) no frio, sempre na chave v1 (fail-soft). */
 export function setCatalogEntry(slug: string, html: string, variants: Variant[]): void {
   const entry: CatalogCacheEntry = { html, variants, fetchedAt: new Date().toISOString() };
   kvSet(catalogKey(slug), entry);
 }
 
-/** Limpa entradas `catalog:*` do frio (fail-soft). Usado por clearCatalogCache(). */
+/** Apaga todas as chaves (v1 + legadas) de um slug (fail-soft). */
+export function deleteCatalogEntry(slug: string): void {
+  const canonical = resolveSlug(slug);
+  const rawNorm = normalizeSlug(slug);
+  const keys = new Set([catalogKey(slug), `catalog:${canonical}`, `catalog:${rawNorm}`]);
+  for (const key of keys) kvDelete(key);
+}
+
+/** Limpa entradas de catálogo v1 e legadas do frio (fail-soft). Usado por clearCatalogCache(). */
 export function clearCatalogEntries(): void {
   const store = getDb();
   if (!store) return;
   try {
     ensureKvTable(store);
-    store.prepare("DELETE FROM kv_cache WHERE key LIKE 'catalog:%'").run();
+    store.prepare("DELETE FROM kv_cache WHERE key LIKE 'catalog:%' OR key LIKE 'v1:catalog:%'").run();
   } catch {
     /* fail-soft */
   }
