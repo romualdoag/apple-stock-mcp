@@ -8,7 +8,7 @@
  */
 
 import { APPLE_BASE_URL, DEFAULT_REFERER, FETCH_TIMEOUT_MS, USER_AGENT, type FetchFn } from "./apple.js";
-import { clearCatalogEntries, getCatalogEntry, setCatalogEntry } from "./catalogCache.js";
+import { clearCatalogEntries, deleteCatalogEntry, getCatalogEntry, setCatalogEntry, validateCatalogEntry } from "./catalogCache.js";
 
 export interface FamilyPage {
   category: "iphone" | "ipad" | "mac" | "watch" | "accessory";
@@ -90,13 +90,19 @@ export function extractVariants(html: string, family: string, url: string): Vari
 }
 
 /**
- * Buy-page HTML com cache FRIO (SQLite kv_cache, chave `catalog:<slug>`,
+ * Buy-page HTML com cache FRIO (SQLite kv_cache, chave `v1:catalog:<slug>`
+ * normalizada + alias de lineup, fallback da legada `catalog:<slug>`,
  * TTL `APPLE_CATALOG_TTL_HOURS`, default 7 dias). Disponibilidade pickup
  * NUNCA passa por aqui — checkAvailability é sempre live.
+ * Hit só é servido se os variants guardados ainda baterem com o html
+ * (validação barata, sem rede); senão invalida e refaz fetch.
  */
 export async function fetchBuyPage(page: FamilyPage, fetchFn: FetchFn = fetch): Promise<string> {
   const cold = getCatalogEntry(page.slug);
-  if (cold) return cold.html;
+  if (cold) {
+    if (validateCatalogEntry(cold)) return cold.html;
+    deleteCatalogEntry(page.slug); // divergiu: invalida e segue pro live
+  }
   let res: Response;
   try {
     res = await fetchFn(page.url, {
